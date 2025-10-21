@@ -1,0 +1,61 @@
+# ============================================================================
+# Security Camera System - Git Ignore File
+# ============================================================================
+
+# Database files (contains event data - device-specific)
+*.db
+*.db-shm
+*.db-wal
+*.db.backup*
+
+# Media files (large, device-specific)
+videos/
+pictures/
+thumbs/
+tmp/
+
+# Log files
+logs/
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments (if you use one)
+venv/
+env/
+ENV/
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+.directory
+
+# Temporary files
+*.tmp
+*.temp
+
+# Web server generated files (if any)
+www/api/*.log
+
+# Backup files
+*.backup
+*.bak
+*~
+
+# Secrets (if you add any later)
+*.key
+*.pem
+secrets.py
+config_local.py.Trash-1000/

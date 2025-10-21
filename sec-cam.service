@@ -1,0 +1,17 @@
+[Unit]
+Description=Security Camera System
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/sec_cam
+ExecStart=/usr/bin/python3 /home/pi/sec_cam/sec_cam_main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
