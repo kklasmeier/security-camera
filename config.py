@@ -23,17 +23,22 @@ TMP_PATH = os.path.join(BASE_PATH, "tmp")
 # CIRCULAR BUFFER SETTINGS
 # ============================================================================
 
-# Circular buffer maintains ~17 seconds of pre-motion footage
-# When motion detected, continue recording for POST_MOTION_SECONDS
-# Total event duration: ~17s (buffer) + POST_MOTION_SECONDS
+# Circular buffer maintains ~17-30 seconds of pre-motion footage (capacity-driven)
+# When motion detected, clear buffer and wait for it to refill for post-motion footage
+# Both pre-motion and post-motion use capacity-driven approach (not time-based)
 
 CIRCULAR_BUFFER_SECONDS = 20   # Target duration (approximate)
-POST_MOTION_SECONDS = 12       # Continue recording after motion for this long
 
-# Total event duration is now variable (capacity-driven buffer + continuation)
-# Actual pre-motion duration depends on buffer capacity and scene complexity
-# Typical total: 15-25s (buffer) + 12s (continuation) = 27-37s
-TOTAL_EVENT_DURATION = 30      # Target total: ~17 + 13 = 30 seconds
+# Post-motion recording: wait for buffer to fill to this percentage
+# 95% = ~950 chunks = ~28-30 seconds of footage
+POST_MOTION_BUFFER_FILL_PERCENT = 0.95
+
+# Post-motion timeout: maximum time to wait for buffer to fill
+# Safety mechanism - if buffer doesn't fill to target, dump whatever we have
+POST_MOTION_TIMEOUT_SECONDS = 60
+
+# Total event duration is variable (capacity-driven for both pre and post)
+# Typical: 20-30s (pre-buffer) + 28-30s (post-buffer) = 48-60s total
 
 # ============================================================================
 # VIDEO BUFFER SETTINGS (Capacity-Driven)
@@ -246,6 +251,8 @@ def print_config():
     print(f"  Max chunks: {CIRCULAR_BUFFER_MAX_CHUNKS}")
     print(f"  Max memory: {CIRCULAR_BUFFER_MAX_BYTES/(1024*1024):.1f} MB")
     print(f"  Target:     ~{CIRCULAR_BUFFER_SECONDS}s (actual varies)")
+    print(f"  Post-motion fill target: {POST_MOTION_BUFFER_FILL_PERCENT*100:.0f}% (~{int(CIRCULAR_BUFFER_MAX_CHUNKS*POST_MOTION_BUFFER_FILL_PERCENT)} chunks)")
+    print(f"  Post-motion timeout: {POST_MOTION_TIMEOUT_SECONDS}s")
     
     print(f"\nMotion Detection:")
     print(f"  Threshold:   {MOTION_THRESHOLD}")

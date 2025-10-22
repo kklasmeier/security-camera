@@ -287,26 +287,38 @@ class EventDatabase:
         finally:
             conn.close()
     
-    def save_video(self, event_id, video_path):
+    def save_video(self, event_id, video_path, duration_seconds=None):
         """
-        Update event with video path (Thread 3, T+17s).
+        Update event with video path and optional duration (Thread 3, T+17s).
         
         Args:
             event_id (int): Event ID
             video_path (str): Path to video file
+            duration_seconds (float, optional): Video duration in seconds (estimated or exact)
             
         Example:
-            db.save_video(42, "/home/pi/sec_cam/videos/2025.10.12--14.23.45.h264")
+            db.save_video(42, "/home/pi/sec_cam/videos/2025.10.12--14.23.45.mp4", 33.5)
         """
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
-            cursor.execute("""
-                UPDATE events 
-                SET video_path = ?, updated_at = ?
-                WHERE id = ?
-            """, (video_path, adapt_datetime(datetime.now()), event_id))
+            # If duration provided, update it; otherwise just update video_path
+            if duration_seconds is not None:
+                # Round to nearest integer for cleaner display
+                duration_int = round(duration_seconds)
+                cursor.execute("""
+                    UPDATE events 
+                    SET video_path = ?, duration_seconds = ?, updated_at = ?
+                    WHERE id = ?
+                """, (video_path, duration_int, adapt_datetime(datetime.now()), event_id))
+                print(f"Event {event_id}: Video saved - duration set to {duration_int}s")
+            else:
+                cursor.execute("""
+                    UPDATE events 
+                    SET video_path = ?, updated_at = ?
+                    WHERE id = ?
+                """, (video_path, adapt_datetime(datetime.now()), event_id))
             
             conn.commit()
             print(f"Event {event_id}: Video saved - processing complete")

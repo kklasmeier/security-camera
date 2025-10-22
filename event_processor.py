@@ -7,10 +7,10 @@ Timeline after motion detected:
 T+0s:   Receive signal from Thread 2
 T+4s:   Save Picture B (current frame at T+4s)
 T+4s:   Create thumbnail from Picture B
-T+4s:   Save event video (buffer + 20s continuation = ~30s total)
-T+~31s: Processing complete, return to waiting
+T+4s:   Save event video (capacity-driven: pre-buffer + wait for post-buffer to fill)
+T+~35s: Processing complete, return to waiting
 
-Uses buffer+continuation approach for full 30-second videos.
+Uses capacity-driven recording for both pre-event and post-event footage.
 """
 
 import time
@@ -24,8 +24,7 @@ from config import (
     PICTURES_PATH,
     THUMBS_PATH,
     VIDEO_PATH,
-    THUMBNAIL_SIZE,
-    POST_MOTION_SECONDS
+    THUMBNAIL_SIZE
 )
 from logger import log
 
@@ -39,7 +38,7 @@ class EventProcessor:
     1. Wait 4 seconds
     2. Save Picture B (frame at T+4s)
     3. Create thumbnail
-    4. Save video (17s buffer + 13s continuation)
+    4. Save video (capacity-driven: pre-buffer + post-buffer)
     5. Update database with all file paths
     
     Usage:
@@ -158,8 +157,8 @@ class EventProcessor:
         Timeline:
         T+0s:  Receive event
         T+4s:  Save Picture B + thumbnail
-        T+4s:  Start saving video (takes ~27s)
-        T+31s: Complete
+        T+4s:  Start saving video (capacity-driven)
+        T+~35s: Complete
         
         Args:
             event_id (int): Database event ID
@@ -188,19 +187,24 @@ class EventProcessor:
             
             gc.collect()
 
-            # Step 4: Save event video (buffer + continuation)
+            # Step 4: Save event video (capacity-driven: pre + post buffers)
             log(f"Event {event_id}: Saving event video...")
             video_path = f"{VIDEO_PATH}/{timestamp_str}.mp4"
             
-            # Use buffer+continuation for full 30-second video
-            self.buffer.save_h264_as_mp4(
+            # Use capacity-driven recording for both pre-event and post-event
+            # Returns estimated duration in seconds
+            estimated_duration = self.buffer.save_h264_as_mp4(
                 video_path,
-                use_continuation=True,
-                continuation_seconds=POST_MOTION_SECONDS
+                use_continuation=True
             )
             
-            self.db.save_video(event_id, video_path)
-            log(f"Event {event_id}: Video saved")
+            # Save video path and estimated duration to database
+            self.db.save_video(event_id, video_path, estimated_duration)
+            
+            if estimated_duration:
+                log(f"Event {event_id}: Video saved (~{estimated_duration:.1f}s duration)")
+            else:
+                log(f"Event {event_id}: Video saved")
             
             gc.collect()
 
@@ -264,10 +268,10 @@ if __name__ == "__main__":
     print("\nProcessing timeline:")
     print("  T+0s:  Receive motion event")
     print("  T+4s:  Save Picture B + thumbnail")
-    print("  T+4s:  Start saving video (~27s)")
-    print("  T+31s: Processing complete")
+    print("  T+4s:  Start saving video (capacity-driven)")
+    print("  T+~35s: Processing complete")
     
-    print("\nTotal processing time: ~31 seconds")
-    print("Thread 2 cooldown: 33 seconds (2s safety margin)")
+    print("\nTotal processing time: ~35 seconds")
+    print("Thread 2 cooldown: 65 seconds (allows buffer to refill)")
     
     print("\nReady for integration testing with full system!")

@@ -80,8 +80,25 @@ for pending in *.h264.pending; do
     rc=$?
 
     if [ $rc -eq 0 ]; then
+        # Get exact duration from MP4 using ffprobe
+        duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$mp4" 2>/dev/null)
+        
+        if [ -n "$duration" ]; then
+            # Round to nearest integer for cleaner display
+            duration_int=$(printf "%.0f" "$duration")
+            
+            # Update database with exact duration
+            # Use the full MP4 path to match the video_path in database
+            sqlite3 /home/pi/sec_cam/events.db \
+                "UPDATE events SET duration_seconds = $duration_int WHERE video_path = '$mp4'" 2>/dev/null
+            
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Converted $base (duration: ${duration_int}s)"
+        else
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Converted $base (duration unavailable)"
+        fi
+        
+        # Clean up H.264 and pending marker
         rm -f "$h264" "$pending"
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✅ Converted $base (low-priority, kill-first)"
     else
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ Failed converting $base (rc=$rc)"
     fi
@@ -98,4 +115,3 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] === Conversion job finished ===" >> "$LOGFI
 
 # --- Release lock automatically on exit ---
 exit 0
-

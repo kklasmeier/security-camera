@@ -198,7 +198,7 @@ class SecurityCameraSystem:
                             
                             elif status == "optimal":
                                 # This is what we want! Only log periodically (every 5th check = 4+ minutes)
-                                if check_count % 50 == 0:
+                                if check_count % 200 == 0:
                                     log(f"[WATCHDOG] Buffer optimal: {current}/{maximum} "
                                         f"chunks ({utilization:.1f}% full), {evictions} total evictions")
                             
@@ -467,7 +467,7 @@ class SecurityCameraSystem:
                 loop_counter += 1
                 
                 # Regular memory logging every 50 seconds
-                if loop_counter % 50 == 0:
+                if loop_counter % 200 == 0:
                     rss_mb = proc.memory_info().rss / (1024 * 1024)
                     log(f"[MEMDEBUG] RSS={rss_mb:.1f} MB")
                 

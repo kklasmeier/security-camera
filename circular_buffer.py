@@ -239,41 +239,60 @@ class CircularBuffer:
             self.stop()
             raise RuntimeError(f"Failed to start camera: {e}")
 
-    def save_event_with_continuation(self, filepath_h264, continuation_seconds=13):
+    def save_event_with_continuation(self, filepath_h264, target_fill_percent=0.95, timeout_seconds=60):
         """
-        Save pre-motion buffer + live continuation with minimal memory usage.
+        Save pre-motion buffer + post-motion buffer using capacity-driven approach.
         
-        Key optimizations:
-        - Shallow snapshot via tuple() prevents deque mutation errors
-        - Stream writes directly to disk (no accumulation list)
-        - Periodic GC to release references
+        Process:
+        1. Dump current buffer to disk (pre-motion footage)
+        2. Clear buffer
+        3. Wait for buffer to refill to target percentage (post-motion footage)
+        4. Dump buffer again to disk
+        5. Result: concatenated H.264 file with both pre and post motion
+        
+        This approach works reliably even when buffer is at 100% capacity,
+        fixing the "0 chunks captured" bug in the old time-based continuation logic.
+        
+        Args:
+            filepath_h264 (str): Output H.264 file path
+            target_fill_percent (float): Target buffer fill (0.0-1.0), default 0.95
+            timeout_seconds (int): Maximum wait time for buffer to fill, default 60
+            
+        Returns:
+            float: Estimated video duration in seconds (calculated from file size and bitrate)
         """
         import os, time, gc
         from pathlib import Path
         from config import CIRCULAR_BUFFER_MAX_CHUNKS, VIDEO_BITRATE
         
+        max_chunks = CIRCULAR_BUFFER_MAX_CHUNKS
+        target_chunks = int(max_chunks * target_fill_percent)
+        
         try:
             # Quick health check
             current_chunks = len(self.circular_output._circular)
-            utilization = (current_chunks / CIRCULAR_BUFFER_MAX_CHUNKS) * 100
+            utilization = (current_chunks / max_chunks) * 100
             
-            log(f"Starting save: buffer at {current_chunks}/{CIRCULAR_BUFFER_MAX_CHUNKS} "
+            log(f"Starting save: buffer at {current_chunks}/{max_chunks} "
                 f"chunks ({utilization:.1f}% full)")
             
             # Only warn if buffer is suspiciously empty (might indicate a problem)
-            if current_chunks < (CIRCULAR_BUFFER_MAX_CHUNKS * 0.3):
+            if current_chunks < (max_chunks * 0.3):
                 log(f"WARNING: Buffer only {utilization:.1f}% full - may have insufficient "
                     f"pre-motion footage", level="WARNING")
             
-            log("Starting memory-optimized save_event_with_continuation...")
+            log("Starting capacity-driven save with buffer clear...")
             
             with open(filepath_h264, "wb", buffering=65536) as f:  # 64KB buffer
-                # === PHASE 1: Dump existing buffer (ensure valid H.264 start) ===
-                log("Dumping pre-motion buffer...")
+                
+                # ================================================================
+                # PHASE 1: Dump pre-motion buffer
+                # ================================================================
+                log("Phase 1: Dumping pre-motion buffer...")
 
                 # Shallow snapshot (references only, not data)
                 chunks_snapshot = tuple(self.circular_output._circular)
-                chunk_count = 0
+                pre_chunk_count = 0
                 found_keyframe = False
 
                 for chunk in chunks_snapshot:
@@ -285,79 +304,127 @@ class CircularBuffer:
                         if not found_keyframe:
                             if is_keyframe:
                                 found_keyframe = True
-                                log(f"Starting from keyframe at chunk {chunk_count}")
+                                log(f"Starting from keyframe at chunk {pre_chunk_count}")
                             else:
                                 continue  # Skip non-keyframe chunks at start
                         
                         # Write chunk data
                         if isinstance(chunk_data, bytes):
                             f.write(chunk_data)
-                            chunk_count += 1
+                            pre_chunk_count += 1
                             
                             # Periodic flush
-                            if chunk_count % 100 == 0:
+                            if pre_chunk_count % 100 == 0:
                                 f.flush()
 
                 if not found_keyframe:
                     log("WARNING: No keyframe found in buffer - video may be unplayable", level="WARNING")
                 
-                log(f"Pre-motion buffer dumped ({chunk_count} chunks)")
+                log(f"Pre-motion buffer dumped ({pre_chunk_count} chunks)")
                 
                 # Critical: release snapshot immediately
                 del chunks_snapshot
+                f.flush()
                 gc.collect()
                 
-                # === PHASE 2: Stream continuation directly ===
-                log(f"Streaming {continuation_seconds}s continuation...")
-                cont_start = time.time()
-                new_chunks = 0
-                last_position = len(self.circular_output._circular)
+                # ================================================================
+                # PHASE 2: Clear buffer for post-motion recording
+                # ================================================================
+                log("Phase 2: Clearing buffer...")
                 
-                while time.time() - cont_start < continuation_seconds:
-                    # Quick snapshot of only what we need
-                    current_deque = self.circular_output._circular
-                    current_len = len(current_deque)
+                # Clear the circular buffer - encoder keeps running and refills it
+                self.circular_output._circular.clear()
+                
+                log(f"Buffer cleared, waiting for {target_chunks} chunks ({target_fill_percent*100:.0f}% fill)...")
+                gc.collect()
+                
+                # ================================================================
+                # PHASE 3: Wait for buffer to refill
+                # ================================================================
+                log(f"Phase 3: Waiting for post-motion buffer to fill...")
+                
+                start_time = time.time()
+                last_log_time = start_time
+                
+                while time.time() - start_time < timeout_seconds:
+                    current_size = len(self.circular_output._circular)
                     
-                    # Check if there are new chunks
-                    if current_len > last_position:
-                        # Only access the NEW chunks (not the entire buffer)
-                        new_count = min(current_len - last_position, 50)  # Max 50 at once
-                        
-                        # Write newest chunks directly
-                        try:
-                            # Use negative indexing to get most recent chunks
-                            for i in range(-new_count, 0):
-                                chunk = current_deque[i]
-                                if isinstance(chunk, tuple) and len(chunk) and isinstance(chunk[0], bytes):
-                                    f.write(chunk[0])
-                                    new_chunks += 1
-                            
-                            # Flush after each batch
-                            f.flush()
-                            
-                        except (IndexError, RuntimeError):
-                            # Deque rotated during access, skip this batch
-                            pass
-                        
-                        last_position = current_len
-                        
-                        # GC every ~2 seconds worth of chunks
-                        if new_chunks % 30 == 0:
-                            gc.collect()
+                    # Log progress every 5 seconds
+                    if time.time() - last_log_time >= 5.0:
+                        elapsed = time.time() - start_time
+                        percent = (current_size / target_chunks) * 100
+                        log(f"Buffer filling: {current_size}/{target_chunks} chunks "
+                            f"({percent:.1f}%) - {elapsed:.1f}s elapsed")
+                        last_log_time = time.time()
                     
-                    time.sleep(0.15)  # Slightly longer sleep = fewer iterations
+                    # Check if we've reached target
+                    if current_size >= target_chunks:
+                        elapsed = time.time() - start_time
+                        log(f"Buffer reached {current_size} chunks (target: {target_chunks}) "
+                            f"in {elapsed:.1f}s")
+                        break
+                    
+                    time.sleep(0.5)  # Check every 500ms
+                else:
+                    # Timeout reached
+                    elapsed = time.time() - start_time
+                    current_size = len(self.circular_output._circular)
+                    log(f"WARNING: Timeout after {elapsed:.1f}s - buffer only at {current_size}/{target_chunks} chunks "
+                        f"({(current_size/target_chunks)*100:.1f}%)", level="WARNING")
+                    log("Dumping whatever we have...", level="WARNING")
+                
+                # ================================================================
+                # PHASE 4: Dump post-motion buffer
+                # ================================================================
+                log("Phase 4: Dumping post-motion buffer...")
+                
+                # Shallow snapshot of post-motion buffer
+                chunks_snapshot = tuple(self.circular_output._circular)
+                post_chunk_count = 0
+                found_keyframe = False
+                
+                for chunk in chunks_snapshot:
+                    if isinstance(chunk, tuple) and len(chunk) >= 2:
+                        chunk_data = chunk[0]
+                        is_keyframe = chunk[1] if len(chunk) > 1 else False
+                        
+                        # Skip chunks until we find a keyframe (ensures valid H.264 continuation)
+                        if not found_keyframe:
+                            if is_keyframe:
+                                found_keyframe = True
+                                log(f"Post-motion starting from keyframe at chunk {post_chunk_count}")
+                            else:
+                                continue  # Skip non-keyframe chunks at start
+                        
+                        # Write chunk data
+                        if isinstance(chunk_data, bytes):
+                            f.write(chunk_data)
+                            post_chunk_count += 1
+                            
+                            # Periodic flush
+                            if post_chunk_count % 100 == 0:
+                                f.flush()
+                
+                if not found_keyframe:
+                    log("WARNING: No keyframe found in post-motion buffer", level="WARNING")
+                
+                log(f"Post-motion buffer dumped ({post_chunk_count} chunks)")
+                
+                # Critical: release snapshot immediately
+                del chunks_snapshot
                 
                 # Final flush
                 f.flush()
                 os.fsync(f.fileno())
             
-            # Verify file and calculate actual duration
+            # ================================================================
+            # Verify and report
+            # ================================================================
             if os.path.exists(filepath_h264):
                 size_mb = os.path.getsize(filepath_h264) / (1024 * 1024)
-                total_chunks = chunk_count + new_chunks
+                total_chunks = pre_chunk_count + post_chunk_count
                 
                 # Calculate actual duration from file size and bitrate
-                # Duration = (file_size_bits) / (bitrate_bits_per_second)
                 size_bits = size_mb * 8 * 1024 * 1024
                 estimated_duration = size_bits / VIDEO_BITRATE
                 
@@ -366,20 +433,19 @@ class CircularBuffer:
                 
                 log(f"Event saved: {size_mb:.2f} MB, {total_chunks} chunks, "
                     f"~{estimated_duration:.1f}s duration")
-                log(f"  Pre-motion buffer: {chunk_count} chunks "
-                    f"(~{(chunk_count/total_chunks)*estimated_duration:.1f}s)")
-                log(f"  Continuation: {new_chunks} chunks "
-                    f"(~{(new_chunks/total_chunks)*estimated_duration:.1f}s)")
+                log(f"  Pre-motion buffer: {pre_chunk_count} chunks "
+                    f"(~{(pre_chunk_count/total_chunks)*estimated_duration:.1f}s)")
+                log(f"  Post-motion buffer: {post_chunk_count} chunks "
+                    f"(~{(post_chunk_count/total_chunks)*estimated_duration:.1f}s)")
                 log(f"  Avg chunk size: {avg_chunk_kb:.1f} KB")
                 
-                # Create pending marker for conversion script
-                Path(filepath_h264 + ".pending").touch(exist_ok=True)
-                log(f"Queued for conversion: {os.path.basename(filepath_h264)}")
+                # Force final cleanup
+                gc.collect()
+                
+                # Return estimated duration for database storage
+                return estimated_duration
             else:
                 raise IOError("File not created")
-            
-            # Force final cleanup
-            gc.collect()
             
         except Exception as e:
             log(f"Error in save_event_with_continuation: {e}", level="ERROR")
@@ -589,31 +655,51 @@ class CircularBuffer:
                 return None
             return self.current_frame.copy()
 
-    def save_h264_as_mp4(self, filepath_mp4, use_continuation=True, continuation_seconds=20):
+    def save_h264_as_mp4(self, filepath_mp4, use_continuation=True, target_fill_percent=None, timeout_seconds=None):
         """
         Save event as .h264 file for later MP4 conversion.
         Adds .pending marker *after* final merge and flush.
+        
+        Uses capacity-driven approach: dumps pre-event buffer, clears it,
+        waits for buffer to refill to target percentage, then dumps post-event buffer.
+        
+        Args:
+            filepath_mp4 (str): Desired MP4 output path (will save as .h264 initially)
+            use_continuation (bool): Whether to use continuation recording (default True)
+            target_fill_percent (float, optional): Target buffer fill for post-motion
+            timeout_seconds (int, optional): Timeout for buffer fill
+            
+        Returns:
+            float or None: Estimated video duration in seconds, or None if use_continuation=False
         """
         import os
         import gc
         from pathlib import Path
-        from config import POST_MOTION_SECONDS
+        from config import POST_MOTION_BUFFER_FILL_PERCENT, POST_MOTION_TIMEOUT_SECONDS, CIRCULAR_BUFFER_MAX_CHUNKS
 
         filepath_h264 = filepath_mp4.replace('.mp4', '.h264')
         pending_marker = filepath_h264 + ".pending"
 
-        # Use config value if not specified
-        if continuation_seconds is None:
-            continuation_seconds = POST_MOTION_SECONDS
+        # Use config values if not specified
+        if target_fill_percent is None:
+            target_fill_percent = POST_MOTION_BUFFER_FILL_PERCENT
+        if timeout_seconds is None:
+            timeout_seconds = POST_MOTION_TIMEOUT_SECONDS
+            
+        target_chunks = int(CIRCULAR_BUFFER_MAX_CHUNKS * target_fill_percent)
+        log(f"Using buffer fill target: {target_fill_percent*100:.0f}% ({target_chunks} chunks), timeout: {timeout_seconds}s")
 
         try:
-            # Step 1: Write the H.264 file
+            # Step 1: Write the H.264 file and get estimated duration
+            estimated_duration = None
+            
             if use_continuation:
-                log(f"Saving event with continuation ({continuation_seconds}s post-motion)...")
-                self.save_event_with_continuation(filepath_h264, continuation_seconds)
+                log(f"Saving event with capacity-driven continuation (target: {target_fill_percent*100:.0f}% fill)...")
+                estimated_duration = self.save_event_with_continuation(filepath_h264, target_fill_percent, timeout_seconds)
             else:
                 log(f"Saving buffer only (~17s)...")
                 self.save_h264_buffer(filepath_h264)
+                # For buffer-only saves, we don't calculate duration (uncommon path)
 
             # Step 2: Ensure all writes and merges are done
             if os.path.exists(filepath_h264):
@@ -632,6 +718,9 @@ class CircularBuffer:
 
             # Step 4: Skip live ffmpeg conversion
             log("Skipping inline ffmpeg conversion (handled by convert_pending.sh)")
+            
+            # Return estimated duration for database storage
+            return estimated_duration
 
         except Exception as e:
             log(f"Error saving H.264 video: {e}", level="ERROR")
@@ -873,9 +962,11 @@ if __name__ == "__main__":
         print("✓ Buffer should now be at operating capacity")
         
         # Test 6: Save video buffer as MP4 with continuation
-        print("\n--- Test 6: Saving video buffer as MP4 (with continuation) ---")
-        print("This will save capacity-driven buffer + continuation (variable total duration)")        # Use continuation to get full 30 seconds
-        buffer.save_h264_as_mp4(test_video_path, use_continuation=True, continuation_seconds=13)
+        print("\n--- Test 6: Saving video buffer as MP4 (capacity-driven) ---")
+        print("This will save pre-buffer + wait for post-buffer to fill (capacity-driven)")
+        test_video_path = os.path.join(test_dir, "test_event.mp4")
+        # Use continuation with capacity-driven approach
+        buffer.save_h264_as_mp4(test_video_path, use_continuation=True)
 
         if os.path.exists(test_video_path):
             size_mb = os.path.getsize(test_video_path) / (1024 * 1024)
