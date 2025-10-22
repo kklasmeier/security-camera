@@ -84,7 +84,8 @@ include 'includes/header.php';
                         $is_processing = is_video_processing($event['video_path']);
                         
                         // Format duration (default 30s if not set)
-                        $duration = isset($event['duration']) ? $event['duration'] : 30;
+                        # $duration = isset($event['duration']) ? $event['duration'] : 30;
+                        $duration = isset($event['duration_seconds']) ? intval($event['duration_seconds']) : 60;
                     ?>
                     
                     <a href="event.php?id=<?php echo $event['id']; ?>" class="event-card">
