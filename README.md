@@ -270,7 +270,7 @@ MIT License - See LICENSE file for details
 
 ## Author
 
-Kyle Klasmeier - https://github.com/kklasmeier
+Kevin Klasmeier - https://github.com/kklasmeier
 
 ## Acknowledgments
 
